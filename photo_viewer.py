@@ -4,6 +4,7 @@ from PIL import Image, ImageTk, ExifTags
 import os
 from datetime import datetime
 import threading
+import subprocess
 
 
 class PhotoViewerApp:
@@ -12,19 +13,21 @@ class PhotoViewerApp:
         self.root.title("Photo Archive Viewer")
 
         self.archive_path = None
-        self.photo_data = []
+        self.photo_data = []  # List of (filepath, datetime)
         self.current_page = 1
-        self.photos_per_page = 12
-        self.grid_cols = 4
-        self.loading_label = None
-        self.filtered_date = None
+        self.photos_per_page = 12  # Initial number of photos per page
+        self.grid_cols = 4  # Initial grid columns
+        self.loading_label = None  # To show loading message
+        self.filtered_date = None  # date filtering
         self.image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp')
         self.sort_by_date = True
+        self.full_size_window = None
 
         # UI elements
         self.create_widgets()
 
     def create_widgets(self):
+        # Menu
         menu_bar = tk.Menu(self.root)
         file_menu = tk.Menu(menu_bar, tearoff=0)
         file_menu.add_command(label="Open Archive", command=self.open_archive)
@@ -32,9 +35,11 @@ class PhotoViewerApp:
         menu_bar.add_cascade(label="File", menu=file_menu)
         self.root.config(menu=menu_bar)
 
+        # Control Frame (Date sort, grid size and pagination)
         control_frame = ttk.Frame(self.root, padding=10)
         control_frame.pack(fill=tk.X)
 
+        # Date Filtering
         ttk.Label(control_frame, text="Filter Date (YYYY-MM-DD):").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
         self.date_filter_var = tk.StringVar()
         self.date_filter_entry = ttk.Entry(control_frame, textvariable=self.date_filter_var, width=12)
@@ -44,6 +49,7 @@ class PhotoViewerApp:
         ttk.Button(control_frame, text="Reset Filter", command=self.reset_filter).grid(row=0, column=3, padx=5, pady=5,
                                                                                        sticky=tk.W)
 
+        # Grid Size Control
         ttk.Label(control_frame, text="Grid Columns:").grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
         self.grid_cols_var = tk.IntVar(value=self.grid_cols)
         grid_cols_spinbox = ttk.Spinbox(control_frame, from_=1, to=10, textvariable=self.grid_cols_var, width=3)
@@ -51,6 +57,7 @@ class PhotoViewerApp:
         ttk.Button(control_frame, text="Set Grid", command=self.update_grid).grid(row=0, column=6, padx=5, pady=5,
                                                                                   sticky=tk.W)
 
+        # Pagination Control
         ttk.Label(control_frame, text="Photos per page:").grid(row=0, column=7, padx=5, pady=5, sticky=tk.W)
         self.photos_per_page_var = tk.IntVar(value=self.photos_per_page)
         photos_per_page_spinbox = ttk.Spinbox(control_frame, from_=1, to=24, textvariable=self.photos_per_page_var,
@@ -67,6 +74,7 @@ class PhotoViewerApp:
         ttk.Button(control_frame, text="Next", command=self.next_page).grid(row=0, column=12, padx=5, pady=5,
                                                                             sticky=tk.W)
 
+        # Photo Display Frame
         self.photo_frame = ttk.Frame(self.root, padding=10)
         self.photo_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -205,6 +213,11 @@ class PhotoViewerApp:
                 name_label = ttk.Label(label_frame, text=filename)
                 name_label.pack()
 
+                # Bind right-click to show context menu
+                label.bind("<Button-3>", lambda event, path=filepath: self.show_context_menu(event, path))
+                # Bind left-click to show full size image
+                label.bind("<Button-1>", lambda event, path=filepath: self.open_full_size_image(event, path))
+
                 col_num += 1
                 if col_num >= self.grid_cols:
                     col_num = 0
@@ -214,6 +227,56 @@ class PhotoViewerApp:
                 print(f"Error displaying image {filepath}: {e}")
 
         self.update_page_label()
+
+    def show_context_menu(self, event, filepath):
+        context_menu = tk.Menu(self.root, tearoff=0)
+        context_menu.add_command(label="Show in Folder", command=lambda: self.execute_show_in_folder(filepath))
+        context_menu.tk_popup(event.x_root, event.y_root)
+
+    def execute_show_in_folder(self, filepath):
+        self.show_in_folder(filepath)
+
+    def show_in_folder(self, filepath):
+        if not os.path.exists(filepath):
+            messagebox.showerror("Error", "File not found")
+            return
+
+        try:
+            if os.name == 'nt':  # Windows
+                subprocess.Popen(['explorer', '/select,', filepath.replace("/", "\\")])
+            elif os.name == 'posix':  # macOS or Linux
+                if os.uname().sysname == "Darwin":  # macOS
+                    subprocess.Popen(['open', '-R', filepath])
+                elif os.uname().sysname == "Linux":
+                    try:  # try with nautilus
+                        subprocess.Popen(
+                            ['nautilus', os.path.dirname(filepath), '--select', os.path.basename(filepath)])
+                    except FileNotFoundError:
+                        try:  # Try with dolphin
+                            subprocess.Popen(['dolphin', '--select', filepath])
+                        except FileNotFoundError:  # try with xdg-open
+                            subprocess.Popen(['xdg-open', os.path.dirname(filepath)])
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Error opening folder: {e}")
+
+    def open_full_size_image(self,event,filepath):
+        try:
+            img = Image.open(filepath)
+            if self.full_size_window:
+                self.full_size_window.destroy()
+            self.full_size_window = tk.Toplevel(self.root)
+            self.full_size_window.title(os.path.basename(filepath))
+            photo_image = ImageTk.PhotoImage(img)
+            label = ttk.Label(self.full_size_window, image=photo_image)
+            label.image=photo_image
+            label.pack(padx=10, pady=10)
+             # Calculate window size with 100px padding
+            window_width = photo_image.width() + 100
+            window_height = photo_image.height() + 100
+            self.full_size_window.geometry(f"{window_width}x{window_height}")
+        except Exception as e:
+             messagebox.showerror("Error", f"Error opening image: {e}")
 
     def get_filtered_photos(self):
         if self.filtered_date:
