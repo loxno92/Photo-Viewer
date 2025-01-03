@@ -22,7 +22,22 @@ class PhotoViewerApp:
         self.image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp')
         self.sort_by_date = True
         self.full_size_window = None
-
+        self.thumbnail_cache = {}  # Dictionary to store thumbnails
+        self.current_full_size_image = None  # To store the last opened full size image
+        self.zoom_level = 1.0  # zoom level
+        self.zoom_bar_width = 200  # Initial width of zoom bar
+        self.zoom_percentage_var = tk.StringVar(value="100%")
+        self.pan_start_x = 0
+        self.pan_start_y = 0
+        self.image_x_offset = 0
+        self.image_y_offset = 0
+        self.image_width = 0
+        self.image_height = 0
+        self.window_width = 0
+        self.window_height = 0
+        self.current_zoom_image = None  # stores the current zoom image
+        self.canvas = None
+        self.canvas_image = None
         # UI elements
         self.create_widgets()
 
@@ -147,6 +162,7 @@ class PhotoViewerApp:
             self.photo_data.sort(key=lambda item: item[1])
         self.current_page = 1
         self.filtered_date = None
+        self.thumbnail_cache = {}
         self.root.after(0, self.display_photos)
         self.root.after(0, self.hide_loading_indicator)
 
@@ -178,6 +194,16 @@ class PhotoViewerApp:
         self.current_page = 1
         self.display_photos()
 
+    def get_thumbnail(self, filepath):
+        if filepath in self.thumbnail_cache:
+            return self.thumbnail_cache[filepath]
+        else:
+            img = Image.open(filepath)
+            img.thumbnail((200, 200))
+            photo_image = ImageTk.PhotoImage(img)
+            self.thumbnail_cache[filepath] = photo_image
+            return photo_image
+
     def display_photos(self):
 
         for widget in self.photo_frame.winfo_children():
@@ -198,9 +224,7 @@ class PhotoViewerApp:
         for item in photos_to_display:
             filepath = item[0]
             try:
-                img = Image.open(filepath)
-                img.thumbnail((200, 200))
-                photo_image = ImageTk.PhotoImage(img)
+                photo_image = self.get_thumbnail(filepath)
 
                 label_frame = ttk.Frame(self.photo_frame)  # Frame for each image + label
                 label_frame.grid(row=row_num, column=col_num, padx=5, pady=5)
@@ -260,23 +284,143 @@ class PhotoViewerApp:
         except Exception as e:
             messagebox.showerror("Error", f"Error opening folder: {e}")
 
-    def open_full_size_image(self,event,filepath):
+    def open_full_size_image(self, event, filepath):
         try:
             img = Image.open(filepath)
+            self.current_full_size_image = img  # stores the current image to use when rotating and zooming.
             if self.full_size_window:
                 self.full_size_window.destroy()
             self.full_size_window = tk.Toplevel(self.root)
             self.full_size_window.title(os.path.basename(filepath))
-            photo_image = ImageTk.PhotoImage(img)
-            label = ttk.Label(self.full_size_window, image=photo_image)
-            label.image=photo_image
-            label.pack(padx=10, pady=10)
-             # Calculate window size with 100px padding
-            window_width = photo_image.width() + 100
-            window_height = photo_image.height() + 100
-            self.full_size_window.geometry(f"{window_width}x{window_height}")
+            # Zoom Control Frame
+            zoom_control_frame = ttk.Frame(self.full_size_window)
+            zoom_control_frame.pack(fill=tk.X, padx=5, pady=5)
+
+            # Zoom out Button
+            ttk.Button(zoom_control_frame, text="-", width=3, command=lambda: self.zoom_image(0.9)).pack(side=tk.LEFT,
+                                                                                                         padx=5)
+
+            # Zoom Scale
+            self.zoom_percentage_var = tk.StringVar(value="100%")
+            zoom_percentage_label = ttk.Label(zoom_control_frame, textvariable=self.zoom_percentage_var, width=5)
+            zoom_percentage_label.pack(side=tk.LEFT, padx=5)
+
+            # Zoom In Button
+            ttk.Button(zoom_control_frame, text="+", width=3, command=lambda: self.zoom_image(1.1)).pack(side=tk.LEFT,
+                                                                                                         padx=5)
+            # Canvas Creation
+            self.canvas = tk.Canvas(self.full_size_window)
+            self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            self.full_size_image = ImageTk.PhotoImage(img)
+            self.canvas_image = self.canvas.create_image(0, 0, image=self.full_size_image, anchor=tk.NW)
+            # Calculate window size with 100px padding
+            self.window_width = self.full_size_image.width() + 100
+            self.window_height = self.full_size_image.height() + 100
+            self.full_size_window.geometry(f"{self.window_width}x{self.window_height}")
+
+            # Calculate Image Boundaries
+            self.image_width = self.full_size_image.width()
+            self.image_height = self.full_size_image.height()
+            # Image Info
+            info_frame = ttk.Frame(self.full_size_window)
+            info_frame.pack(pady=5)
+
+            ttk.Label(info_frame, text=f"Filename: {os.path.basename(filepath)}").pack()
+            ttk.Label(info_frame, text=f"Dimensions: {img.width}x{img.height}").pack()
+            date_taken = self.extract_date(filepath)
+            if date_taken:
+                ttk.Label(info_frame, text=f"Date Taken: {date_taken.strftime('%Y-%m-%d')}").pack()
+            else:
+                file_date = self.get_file_modification_date(filepath)
+                ttk.Label(info_frame, text=f"Date Modified: {file_date.strftime('%Y-%m-%d')}").pack()
+
+            # Bind image for rotate, panning
+            self.canvas.tag_bind(self.canvas_image, "<Button-1>",
+                                 lambda event: self.handle_image_click(event, filepath))
+            self.canvas.tag_bind(self.canvas_image, "<ButtonPress-1>", self.start_pan)
+            self.canvas.tag_bind(self.canvas_image, "<B1-Motion>", self.pan_image)
         except Exception as e:
-             messagebox.showerror("Error", f"Error opening image: {e}")
+            messagebox.showerror("Error", f"Error opening image: {e}")
+
+    def handle_image_click(self, event, filepath):
+        if event.state & 0x0004:  # Shift key is pressed
+            self.rotate_image(90)
+
+    def start_pan(self, event):
+        self.pan_start_x = event.x
+        self.pan_start_y = event.y
+
+    def pan_image(self, event):
+        if self.current_full_size_image:
+            dx = event.x - self.pan_start_x
+            dy = event.y - self.pan_start_y
+
+            # Calculate the new offsets
+            new_x_offset = self.image_x_offset + dx
+            new_y_offset = self.image_y_offset + dy
+
+            # Calculate the bounds of the image
+            img_width = int(self.current_full_size_image.width * self.zoom_level)
+            img_height = int(self.current_full_size_image.height * self.zoom_level)
+
+            max_x = 0
+            min_x = self.window_width - img_width
+            max_y = 0
+            min_y = self.window_height - img_height
+
+            # Apply bounds
+            if img_width > self.window_width:
+                new_x_offset = max(min(new_x_offset, max_x), min_x)
+            else:
+                new_x_offset = (self.window_width - img_width) / 2
+            if img_height > self.window_height:
+                new_y_offset = max(min(new_y_offset, max_y), min_y)
+            else:
+                new_y_offset = (self.window_height - img_height) / 2
+
+            self.image_x_offset = new_x_offset
+            self.image_y_offset = new_y_offset
+
+            self.pan_start_x = event.x
+            self.pan_start_y = event.y
+
+            self.canvas.move(self.canvas_image, dx, dy)
+
+    def rotate_image(self, angle):
+        if self.current_full_size_image:
+            rotated_img = self.current_full_size_image.rotate(angle, expand=True)
+            self.current_full_size_image = rotated_img
+            self.current_zoom_image = ImageTk.PhotoImage(rotated_img)
+            self.canvas.itemconfig(self.canvas_image, image=self.current_zoom_image)
+            self.image_x_offset = 0
+            self.image_y_offset = 0
+            self.canvas.move(self.canvas_image, -self.canvas.coords(self.canvas_image)[0] + self.image_x_offset,
+                             -self.canvas.coords(self.canvas_image)[1] + self.image_y_offset)
+            self.image_width = self.current_zoom_image.width()
+            self.image_height = self.current_zoom_image.height()
+            window_width = self.image_width + 100
+            window_height = self.image_height + 100
+            self.full_size_window.geometry(f"{window_width}x{window_height}")
+
+    def zoom_image(self, zoom_factor):
+        if self.current_full_size_image:
+            self.zoom_level *= zoom_factor
+            width = int(self.current_full_size_image.width * self.zoom_level)
+            height = int(self.current_full_size_image.height * self.zoom_level)
+            zoomed_img = self.current_full_size_image.resize((width, height))
+            self.current_zoom_image = ImageTk.PhotoImage(zoomed_img)
+            self.canvas.itemconfig(self.canvas_image, image=self.current_zoom_image)
+            self.image_x_offset = 0
+            self.image_y_offset = 0
+            self.canvas.move(self.canvas_image, -self.canvas.coords(self.canvas_image)[0] + self.image_x_offset,
+                             -self.canvas.coords(self.canvas_image)[1] + self.image_y_offset)
+            self.image_width = self.current_zoom_image.width()
+            self.image_height = self.current_zoom_image.height()
+            window_width = self.image_width + 100
+            window_height = self.image_height + 100
+            self.full_size_window.geometry(f"{window_width}x{window_height}")
+            zoom_percentage = int(self.zoom_level * 100)
+            self.zoom_percentage_var.set(f"{zoom_percentage}%")
 
     def get_filtered_photos(self):
         if self.filtered_date:
